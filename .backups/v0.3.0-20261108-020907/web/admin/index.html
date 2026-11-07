@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#1769aa">
+  <title>مدیریت CafeDrop</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <style>
+    body{padding:20px}.admin{max-width:960px;margin:0 auto}.muted{color:#778597;font-size:13px}
+    .card{background:#fff;border:1px solid #e5ebf1;border-radius:16px;padding:18px;margin:16px 0;box-shadow:0 8px 28px rgba(25,55,85,.05)}
+    .login{max-width:440px;margin:8vh auto}.field{display:grid;gap:7px;margin:12px 0}.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #d9e1ea;border-radius:10px;font:inherit}
+    button{padding:12px 18px;border:0;border-radius:10px;background:#1769aa;color:#fff;font:inherit;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}
+    .secondary{background:#eaf1f7;color:#174e78}.toolbar{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .search{display:flex;gap:8px;margin:16px 0}.search input{flex:1;min-width:0;padding:12px;border:1px solid #d9e1ea;border-radius:10px;font:inherit}
+    .item{padding:13px 4px;border-bottom:1px solid #e8edf2;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}.item:last-child{border-bottom:0}
+    .notice{padding:11px 13px;border-radius:10px;background:#f0f5fa;color:#34536d;margin:12px 0}.notice.error{background:#fff0f0;color:#a32626}.notice.success{background:#effaf2;color:#176b32}
+    .hidden{display:none!important}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f9fb;padding:12px;border-radius:10px;direction:ltr;text-align:left}
+    a{color:#1769aa}.small{font-size:12px;color:#778597}
+    .file-list{display:grid;gap:9px;margin-top:14px}.file-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px;border:1px solid #e5ebf1;border-radius:12px;background:#fbfcfe}.file-name{font-weight:600;overflow-wrap:anywhere}.file-meta{font-size:12px;color:#778597;margin-top:4px}.path-box{direction:ltr;text-align:left;overflow-wrap:anywhere;background:#f4f7fa;border-radius:10px;padding:10px;font-size:12px;margin-top:8px}.item button{padding:8px 12px;font-size:13px}
+  </style>
+</head>
+<body>
+  <main class="admin">
+    <section id="loginView" class="card login">
+      <h1>ورود به مدیریت CafeDrop</h1>
+      <p class="muted">برای مشاهده و مدیریت درخواست‌های آپلود وارد شوید.</p>
+      <form id="loginForm">
+        <label class="field"><span>نام کاربری</span><input id="username" name="username" autocomplete="username" value="admin" required></label>
+        <label class="field"><span>رمز عبور</span><input id="password" name="password" type="password" autocomplete="current-password" required></label>
+        <button id="loginButton" type="submit">ورود</button>
+      </form>
+      <div id="loginMessage" class="notice hidden" role="alert"></div>
+    </section>
+
+    <section id="dashboard" class="hidden">
+      <header class="toolbar">
+        <div><h1>مدیریت CafeDrop</h1><p class="muted">جست‌وجوی کد پیگیری و مشاهده درخواست‌های اخیر</p></div>
+        <button id="logout" class="secondary" type="button">خروج</button>
+      </header>
+      <section class="card">
+        <h2>جست‌وجوی درخواست</h2>
+        <form id="searchForm" class="search"><input id="code" placeholder="کد پیگیری؛ مثلاً CD-A1B2C3D4" autocomplete="off"><button type="submit">جست‌وجو</button></form>
+        <div id="searchMessage" class="notice hidden" role="status"></div>
+        <div id="output"></div>
+      </section>
+      <section class="card">
+        <div class="toolbar"><h2>آخرین درخواست‌ها</h2><button id="refresh" class="secondary" type="button">به‌روزرسانی</button></div>
+        <div id="items"><p class="muted">در حال بارگذاری...</p></div>
+      </section>
+    </section>
+  </main>
+<script>
+(() => {
+  const $ = (selector) => document.querySelector(selector);
+  const loginView = $('#loginView'), dashboard = $('#dashboard');
+  let authorization = '';
+
+  function showMessage(target, message, type = '') {
+    target.textContent = message;
+    target.className = 'notice' + (type ? ' ' + type : '');
+    target.classList.remove('hidden');
+  }
+  function hideMessage(target) { target.classList.add('hidden'); }
+  function base64UTF8(value) {
+    const bytes = new TextEncoder().encode(value);
+    let binary = '';
+    bytes.forEach(byte => binary += String.fromCharCode(byte));
+    return btoa(binary);
+  }
+  async function api(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', authorization);
+    const response = await fetch(path, {...options, headers, cache: 'no-store'});
+    if (response.status === 401) throw new Error('احراز هویت ناموفق است. نام کاربری یا رمز عبور را بررسی کنید.');
+    return response;
+  }
+  async function loadUploads() {
+    const target = $('#items');
+    target.textContent = 'در حال بارگذاری...';
+    try {
+      const response = await api('/api/admin/uploads');
+      if (!response.ok) throw new Error('دریافت فهرست درخواست‌ها ناموفق بود.');
+      renderUploads(await response.json());
+    } catch (error) {
+      target.replaceChildren();
+      const message = document.createElement('div'); message.className = 'notice error'; message.textContent = error.message; target.append(message);
+      if (error.message.includes('احراز هویت')) doLogout();
+    }
+  }
+  async function downloadWithAuth(url, filename) {
+    const response = await api(url);
+    if (!response.ok) throw new Error('دریافت فایل ناموفق بود.');
+    const blob = await response.blob();
+    const objectURL = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = objectURL; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(objectURL), 30000);
+  }
+  function renderDetail(data) {
+    const target = $('#output'); target.replaceChildren();
+    const heading = document.createElement('h3'); heading.textContent = 'درخواست ' + data.upload.code;
+    const summary = document.createElement('p'); summary.className = 'muted';
+    summary.textContent = `${data.upload.file_count} فایل · ${(data.upload.total_bytes / 1048576).toFixed(2)} مگابایت · ${data.upload.status}`;
+    const pathLabel = document.createElement('div'); pathLabel.className = 'small'; pathLabel.textContent = 'مسیر ذخیره‌سازی روی کامپیوتر میزبان:';
+    const path = document.createElement('div'); path.className = 'path-box'; path.textContent = data.folder;
+    const filesTitle = document.createElement('h3'); filesTitle.textContent = 'فایل‌های این درخواست';
+    const files = document.createElement('div'); files.className = 'file-list';
+    (data.files || []).forEach(file => {
+      const row = document.createElement('div'); row.className = 'file-row';
+      const info = document.createElement('div');
+      const name = document.createElement('div'); name.className = 'file-name'; name.textContent = file.original_name;
+      const meta = document.createElement('div'); meta.className = 'file-meta'; meta.textContent = `${(file.size_bytes / 1048576).toFixed(2)} مگابایت`;
+      info.append(name, meta);
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = 'دریافت فایل';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try { await downloadWithAuth('/api/admin/download-file?code=' + encodeURIComponent(data.upload.code) + '&file_id=' + encodeURIComponent(file.id), file.original_name); }
+        catch (error) { showMessage($('#searchMessage'), error.message, 'error'); }
+        finally { button.disabled = false; }
+      });
+      row.append(info, button); files.append(row);
+    });
+    const zipButton = document.createElement('button'); zipButton.type = 'button'; zipButton.className = 'secondary'; zipButton.textContent = 'دریافت همه فایل‌ها (ZIP)';
+    zipButton.addEventListener('click', async () => {
+      zipButton.disabled = true;
+      try { await downloadWithAuth('/api/admin/download?code=' + encodeURIComponent(data.upload.code), data.upload.code + '.zip'); }
+      catch (error) { showMessage($('#searchMessage'), error.message, 'error'); }
+      finally { zipButton.disabled = false; }
+    });
+    target.append(heading, summary, pathLabel, path, filesTitle, files, zipButton);
+  }
+  async function showLookup(code) {
+    hideMessage($('#searchMessage')); $('#output').replaceChildren();
+    const response = await api('/api/admin/lookup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code})});
+    if (response.status === 404) { showMessage($('#searchMessage'), 'درخواستی با این کد پیدا نشد.', 'error'); return; }
+    if (!response.ok) throw new Error('جست‌وجو ناموفق بود.');
+    renderDetail(await response.json());
+    showMessage($('#searchMessage'), 'درخواست پیدا شد.', 'success');
+  }
+  function doLogout() {
+    authorization = '';
+    $('#password').value = '';
+    dashboard.classList.add('hidden');
+    loginView.classList.remove('hidden');
+  }
+  $('#loginForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = $('#loginButton'); button.disabled = true;
+    hideMessage($('#loginMessage'));
+    authorization = 'Basic ' + base64UTF8($('#username').value + ':' + $('#password').value);
+    try {
+      const response = await api('/api/admin/uploads');
+      if (!response.ok) throw new Error('ورود انجام نشد. پاسخ سرور: ' + response.status);
+      loginView.classList.add('hidden'); dashboard.classList.remove('hidden');
+      const rows = await response.json();
+      renderUploads(rows);
+    } catch (error) {
+      authorization = '';
+      showMessage($('#loginMessage'), error.message, 'error');
+    } finally { button.disabled = false; }
+  });
+  function renderUploads(rows) {
+    const target = $('#items'); target.replaceChildren();
+    if (!rows || rows.length === 0) { target.textContent = 'هنوز درخواستی ثبت نشده است.'; return; }
+    rows.forEach(row => {
+      const item = document.createElement('div'); item.className = 'item';
+      const info = document.createElement('div');
+      const label = document.createElement('strong'); label.textContent = row.code;
+      const details = document.createElement('div'); details.className = 'small';
+      details.textContent = `${row.file_count} فایل · ${(row.total_bytes / 1048576).toFixed(2)} مگابایت · ${row.status}`;
+      info.append(label, details);
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary'; button.textContent = 'مشاهده فایل‌ها';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try { $('#code').value = row.code; await showLookup(row.code); }
+        catch (error) { showMessage($('#searchMessage'), error.message, 'error'); }
+        finally { button.disabled = false; }
+      });
+      item.append(info, button); target.append(item);
+    });
+  }
+  $('#searchForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const code = $('#code').value.trim();
+    if (!code) { showMessage($('#searchMessage'), 'کد پیگیری را وارد کنید.', 'error'); return; }
+    try { await showLookup(code); }
+    catch (error) { showMessage($('#searchMessage'), error.message, 'error'); }
+  });
+  $('#refresh').addEventListener('click', loadUploads);
+  $('#logout').addEventListener('click', doLogout);
+})();
+</script>
+</body>
+</html>
