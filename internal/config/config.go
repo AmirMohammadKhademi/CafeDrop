@@ -29,7 +29,7 @@ func Load() Config {
 		AdminUser:          env("CAFEDROP_ADMIN_USER", "admin"),
 		AdminPassword:      env("CAFEDROP_ADMIN_PASSWORD", "change-this-password"),
 		MaxUploadBytes:     maxBytes,
-		MaxFilesPerRequest: envInt("CAFEDROP_MAX_FILES", 10),
+		MaxFilesPerRequest: envInt("CAFEDROP_MAX_FILES", 500),
 		RetentionHours:     envInt("CAFEDROP_RETENTION_HOURS", 24),
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"cafedrop/internal/store"
 )
@@ -98,7 +99,7 @@ func (s *Server) handleAdminUploads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	items, err := s.db.ListUploads(100)
+	items, err := s.db.ListUploads(500)
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return
@@ -243,4 +244,119 @@ func (s *Server) handleSearchUploads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, rows)
+}
+
+func (s *Server) handleAdminUploadStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Code        string `json:"code"`
+		AdminStatus string `json:"admin_status"`
+		AdminNote   string `json:"admin_note"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	in.Code = strings.TrimSpace(in.Code)
+	in.AdminNote = strings.TrimSpace(in.AdminNote)
+	if in.Code == "" || len(in.Code) > 80 || utf8.RuneCountInString(in.AdminNote) > 2000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid code or note"})
+		return
+	}
+	switch in.AdminStatus {
+	case "received", "reviewing", "delivered", "rejected":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request status"})
+		return
+	}
+	u, err := s.db.FindUpload(in.Code)
+	if err != nil {
+		if store.IsNoRows(err) {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+	if u.Status != "completed" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "upload is not complete yet"})
+		return
+	}
+	if err := s.db.UpdateUploadWorkflowStatus(in.Code, in.AdminStatus, in.AdminNote); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not update request status"})
+		return
+	}
+	updated, err := s.db.FindUpload(in.Code)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not reload request"})
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleAdminDeleteUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	code := strings.TrimSpace(in.Code)
+	if code == "" || len(code) > 80 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tracking code"})
+		return
+	}
+
+	// Resolve and validate the stored folder before deleting the DB record.
+	u, err := s.db.FindUpload(code)
+	if err != nil {
+		if store.IsNoRows(err) {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+	if u.Status == "uploading" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "upload is still in progress"})
+		return
+	}
+	root, err := filepath.Abs(s.cfg.UploadDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "storage path error"})
+		return
+	}
+	folder, err := filepath.Abs(u.Folder)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "storage path error"})
+		return
+	}
+	rel, err := filepath.Rel(root, folder)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unsafe storage path"})
+		return
+	}
+
+	deletedFolder, err := s.db.DeleteUpload(code)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not delete request"})
+		return
+	}
+	// The DB record is authoritative; report a cleanup warning if files could
+	// not be removed so the administrator can manually inspect the folder.
+	if deletedFolder != "" {
+		if err := os.RemoveAll(folder); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "warning": "record deleted but stored files could not be fully removed"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 }

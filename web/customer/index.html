@@ -1,3 +1,81 @@
 <!doctype html>
-<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#1769aa"><title>ارسال فایل | CafeDrop</title><link rel="stylesheet" href="/assets/app.css"></head>
-<body><main class="shell"><header class="brand"><div class="mark">CD</div><div><strong id="shopName">کافینت شما</strong><small>ارسال سریع فایل از گوشی</small></div></header><section class="hero"><span class="eyebrow">ساده، سریع، محلی</span><h1>فایل‌هات رو اینجا بفرست</h1><p>عکس، PDF و مدارکت رو انتخاب کن و کد تحویل بگیر.</p></section><section class="panel"><div id="sessionStatus" class="session-status" role="status">در حال بررسی ظرفیت ارسال...</div><label class="picker" for="files"><span class="upload-icon">↑</span><strong>انتخاب فایل</strong><small>می‌تونی چند فایل رو هم‌زمان انتخاب کنی</small></label><input id="files" type="file" multiple hidden><div id="fileList" class="file-list"></div><button id="send" class="primary" disabled>ارسال فایل‌ها</button><div id="progressWrap" class="progress-wrap" hidden><div class="progress"><span id="progress"></span></div><small id="progressText">در حال ارسال...</small></div><div id="result" class="result" hidden></div><p class="privacy">فایل‌ها مستقیماً در شبکه داخلی کافینت ذخیره می‌شن.</p></section><section class="links"><h2>برنامه‌های کاربردی</h2><div class="link-grid"><a href="https://web.telegram.org/" rel="noreferrer">تلگرام</a><a href="https://web.bale.ai/" rel="noreferrer">بله</a><a href="https://eitaa.com/" rel="noreferrer">ایتا</a><a href="https://web.rubika.ir/" rel="noreferrer">روبیکا</a></div></section><footer>ارائه‌شده با CafeDrop</footer></main><script src="/assets/app.js" defer></script></body></html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f4f2eb">
+  <title>ارسال فایل | CafeDrop</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script>
+    (() => {
+      const setTheme = () => {
+        const hour = new Date().getHours();
+        const theme = hour >= 7 && hour < 19 ? 'light' : 'dark';
+        document.documentElement.dataset.theme = theme;
+        const meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.content = theme === 'dark' ? '#101b18' : '#f4f2eb';
+      };
+      setTheme();
+      window.setInterval(setTheme, 60000);
+    })();
+  </script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true">
+    <span class="orb orb-one"></span><span class="orb orb-two"></span><span class="orb orb-three"></span>
+    <span class="ambient-grid"></span>
+  </div>
+  <main class="shell">
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true"><span>CD</span><i></i></div>
+      <div class="brand-copy"><strong id="shopName">کافینت شما</strong><small id="currentDateTime"></small></div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-kicker"><span class="kicker-line"></span> <span id="heroDate">امروز</span></div>
+      <h1>ارسال فایل</h1>
+      <p>فایل‌ها را انتخاب کنید و برای متصدی بفرستید.</p>
+      <div class="hero-decoration" aria-hidden="true"><span class="deco-ring"></span><span class="deco-dot"></span><span class="deco-spark">✳</span></div>
+    </section>
+
+    <section class="upload-card" aria-label="ارسال فایل">
+      <div class="card-topline"><span class="step-number">۰۱</span><span>فایل‌های موردنظر</span></div>
+      <div id="sessionStatus" class="session-status" role="status" hidden></div>
+      <label class="picker" for="files">
+        <span class="picker-icon"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15.5v3A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <strong>انتخاب فایل‌ها</strong>
+        <small>می‌توانید هر تعداد فایل را با هم انتخاب کنید یا چند بار فایل اضافه کنید.</small>
+        <span class="picker-hint">عکس · PDF · Word · Excel · ویدئو</span>
+      </label>
+      <input id="files" type="file" multiple hidden>
+      <div id="fileList" class="file-list"></div>
+      <div class="large-file-area">
+        <div><strong>فایل حجیم دارید؟</strong><small>فایل‌های بزرگ را جداگانه اضافه کنید؛ ارسال همه فایل‌ها با هم انجام می‌شود.</small></div>
+        <label class="large-picker" for="largeFiles">انتخاب فایل حجیم</label>
+        <input id="largeFiles" type="file" multiple hidden>
+        <div id="largeFileList" class="file-list"></div>
+      </div>
+      <button id="send" class="primary" disabled><span>ارسال فایل‌ها</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h13m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div id="progressWrap" class="progress-wrap" hidden>
+        <div class="progress-heading"><span>در حال ارسال فایل‌ها</span><strong id="progressText">۰٪</strong></div>
+        <div class="progress"><span id="progress"></span></div>
+        <small class="progress-caption">لطفاً تا پایان ارسال، این صفحه رو نبند.</small>
+      </div>
+      <div id="result" class="result" hidden></div>
+
+    </section>
+
+    <section class="links-card">
+      <div class="links-heading"><div><span class="section-kicker">دسترسی سریع</span><h2>برنامه‌های کاربردی</h2></div><span class="external-mark">↗</span></div>
+      <div class="link-grid">
+        <a href="https://web.telegram.org/" rel="noreferrer"><span class="link-symbol telegram">➤</span><span>تلگرام</span></a>
+        <a href="https://web.bale.ai/" rel="noreferrer"><span class="link-symbol bale">ب</span><span>بله</span></a>
+        <a href="https://eitaa.com/" rel="noreferrer"><span class="link-symbol eitaa">ا</span><span>ایتا</span></a>
+        <a href="https://web.rubika.ir/" rel="noreferrer"><span class="link-symbol rubika">ر</span><span>روبیکا</span></a>
+      </div>
+    </section>
+    <footer><span class="footer-mark">CD</span><span>ساخته‌شده با CafeDrop</span><span class="footer-dot"></span><span>نسخه محلی</span></footer>
+  </main>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

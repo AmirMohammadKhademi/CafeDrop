@@ -1,30 +1,24 @@
-const input=document.querySelector('#files'),list=document.querySelector('#fileList'),send=document.querySelector('#send'),result=document.querySelector('#result'),wrap=document.querySelector('#progressWrap'),bar=document.querySelector('#progress'),progressText=document.querySelector('#progressText');let selected=[];let sessionReady=false;let sessionState='';let sessionTimer=null;
+const input=document.querySelector('#files'),largeInput=document.querySelector('#largeFiles');
+const list=document.querySelector('#fileList'),largeList=document.querySelector('#largeFileList');
+const send=document.querySelector('#send'),result=document.querySelector('#result'),wrap=document.querySelector('#progressWrap'),bar=document.querySelector('#progress'),progressText=document.querySelector('#progressText');
+let regularFiles=[],largeFiles=[],sessionReady=false,sessionTimer=null;
 const fmt=n=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:`${(n/1048576).toFixed(1)} MB`;
-input.addEventListener('change',()=>{selected=[...input.files];list.innerHTML='';selected.forEach(f=>{const d=document.createElement('div');d.className='file-item';const n=document.createElement('span');n.textContent=f.name;const z=document.createElement('span');z.textContent=fmt(f.size);d.append(n,z);list.append(d)});send.disabled=!selected.length||!sessionReady;result.hidden=true});
-send.addEventListener('click',()=>{if(!selected.length||!sessionReady)return;send.disabled=true;wrap.hidden=false;bar.style.width='0%';const data=new FormData();selected.forEach(f=>data.append('files',f));const xhr=new XMLHttpRequest();xhr.open('POST','/api/uploads');xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);bar.style.width=p+'%';progressText.textContent=`در حال ارسال... ${p}%`}};xhr.onload=()=>{wrap.hidden=true;send.disabled=false;try{const d=JSON.parse(xhr.responseText);if(xhr.status>=200&&xhr.status<300){result.hidden=false;result.innerHTML='';const t=document.createElement('div');t.textContent='فایل‌های شما با موفقیت ارسال شدند';const c=document.createElement('strong');c.textContent=d.code;const h=document.createElement('small');h.textContent=`${d.file_count} فایل دریافت شد. کد را به متصدی اعلام کنید.`;result.append(t,c,h);selected=[];input.value='';list.innerHTML='';send.disabled=true}else throw new Error(d.error||xhr.responseText)}catch(e){alert('ارسال انجام نشد. لطفاً دوباره تلاش کنید.')}};xhr.onerror=()=>{wrap.hidden=true;send.disabled=false;alert('ارتباط با سرور برقرار نشد.')};xhr.send(data)});
-
-
+const allFiles=()=>[...regularFiles,...largeFiles];
+function renderFiles(){
+  const render=(target,files,kind)=>{target.replaceChildren();files.forEach((file,index)=>{const row=document.createElement('div');row.className='file-item';const name=document.createElement('span');name.textContent=file.name;const meta=document.createElement('span');meta.textContent=fmt(file.size);const remove=document.createElement('button');remove.type='button';remove.className='remove-file';remove.textContent='حذف';remove.setAttribute('aria-label','حذف '+file.name);remove.addEventListener('click',()=>{if(kind==='regular')regularFiles.splice(index,1);else largeFiles.splice(index,1);renderFiles()});row.append(name,meta,remove);target.append(row)})};
+  render(list,regularFiles,'regular');render(largeList,largeFiles,'large');send.disabled=!allFiles().length||!sessionReady;
+}
+function addFiles(target,files){for(const file of files){if(allFiles().length>=500){alert('حداکثر ۵۰۰ فایل در هر درخواست قابل انتخاب است.');break}target.push(file)}renderFiles();result.hidden=true}
+input.addEventListener('change',()=>{addFiles(regularFiles,[...input.files]);input.value=''});
+largeInput.addEventListener('change',()=>{addFiles(largeFiles,[...largeInput.files]);largeInput.value=''});
+send.addEventListener('click',()=>{const files=allFiles();if(!files.length||!sessionReady)return;send.disabled=true;wrap.hidden=false;bar.style.width='0%';const data=new FormData();files.forEach(f=>data.append('files',f));const xhr=new XMLHttpRequest();xhr.open('POST','/api/uploads');xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);bar.style.width=p+'%';progressText.textContent=`در حال ارسال... ${p}٪`}};xhr.onload=()=>{wrap.hidden=true;try{const d=JSON.parse(xhr.responseText);if(xhr.status>=200&&xhr.status<300){result.hidden=false;result.replaceChildren();const t=document.createElement('div');t.textContent='فایل‌ها با موفقیت دریافت شدند';const c=document.createElement('strong');c.textContent=d.code;const h=document.createElement('small');h.textContent=`${d.file_count} فایل دریافت شد. کد را به متصدی اعلام کنید.`;result.append(t,c,h);regularFiles=[];largeFiles=[];renderFiles()}else if(xhr.status===403){sessionReady=false;showSessionExpired();}else throw new Error(d.error||xhr.responseText)}catch(e){if(xhr.status!==403)alert(e.message||'ارسال انجام نشد. لطفاً دوباره تلاش کنید.')}finally{send.disabled=!allFiles().length||!sessionReady}};xhr.onerror=()=>{wrap.hidden=true;send.disabled=!allFiles().length||!sessionReady;alert('ارتباط با سرور برقرار نشد.')};xhr.send(data)});
+function showSessionExpired(){const box=document.querySelector('#sessionStatus');box.hidden=false;box.className='session-status error';box.textContent='زمان استفاده شما به پایان رسیده است. برای ادامه، صفحه را تازه‌سازی کنید.';send.disabled=true}
+(function updateClock(){const now=new Date();const date=now.toLocaleDateString('fa-IR',{weekday:'long',day:'numeric',month:'long'});const time=now.toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'});const line=`${date} · ${time}`;const el=document.querySelector('#currentDateTime');if(el)el.textContent=line;const hero=document.querySelector('#heroDate');if(hero)hero.textContent=line;setTimeout(updateClock,30000)})();
 (async function sessionController(){
   const statusBox=document.querySelector('#sessionStatus');
-  const fmtTime=value=>{if(!value)return '';const d=new Date(value);return d.toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'});};
-  function show(message,kind){statusBox.textContent=message;statusBox.className='session-status '+(kind||'');}
-  function apply(data){
-    sessionState=data.status;
-    if(data.status==='active'){
-      sessionReady=true;send.disabled=!selected.length;
-      show(`اتصال فعال است · ${data.active_count} از ${data.active_limit} ظرفیت استفاده شده · پایان زمان: ${fmtTime(data.expires_at)}`,'active');
-    }else if(data.status==='grace'){
-      sessionReady=true;send.disabled=!selected.length;
-      show(`زمان استفاده تمام شده؛ مهلت تکمیل ارسال تا ${fmtTime(data.grace_until)} فعال است.`,'waiting');
-    }else if(data.status==='waiting'){
-      sessionReady=false;send.disabled=true;
-      show(`ظرفیت تکمیل است. شما در صف انتظار شماره ${data.queue_position||1} هستید؛ پس از آزاد شدن ظرفیت، اتصال فعال می‌شود.`,'waiting');
-    }else{
-      sessionReady=false;send.disabled=true;show('نشست فعال نیست. صفحه را تازه‌سازی کنید.','error');
-    }
-  }
-  async function post(path){const r=await fetch(path,{method:'POST',cache:'no-store'});const d=await r.json().catch(()=>({}));if(!r.ok&&r.status!==202)throw new Error(d.error||'خطای نشست');return d;}
-  try{apply(await post('/api/session/start'));}
-  catch(e){show('امکان ایجاد نشست وجود ندارد. صفحه را تازه‌سازی کنید.','error');return;}
-  sessionTimer=setInterval(async()=>{try{apply(await post('/api/session/heartbeat'));}catch(e){sessionReady=false;send.disabled=true;show('ارتباط با سرور قطع شده است؛ دوباره تلاش کنید.','error');}},15000);
+  function applyShopName(data){if(data.shop_name){const el=document.querySelector('#shopName');el.textContent=data.shop_name;document.title=`ارسال فایل | ${data.shop_name}`}}
+  function apply(data){applyShopName(data);if(data.status==='active'){sessionReady=true;statusBox.hidden=true;send.disabled=!allFiles().length}else if(data.status==='waiting'){sessionReady=false;send.disabled=true;statusBox.hidden=false;statusBox.className='session-status waiting';statusBox.textContent=`ظرفیت ارسال تکمیل است. جایگاه شما در صف: ${data.queue_position||'—'}` }else{sessionReady=false;showSessionExpired()}}
+  async function post(path){const r=await fetch(path,{method:'POST',cache:'no-store'});const d=await r.json().catch(()=>({}));if(!r.ok&&r.status!==202)throw new Error(d.error||'خطای نشست');return d}
+  try{apply(await post('/api/session/start'))}catch(e){showSessionExpired();return}
+  sessionTimer=setInterval(async()=>{try{apply(await post('/api/session/heartbeat'))}catch(e){sessionReady=false;showSessionExpired()}},10000)
 })();

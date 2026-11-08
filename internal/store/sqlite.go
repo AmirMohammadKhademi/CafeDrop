@@ -19,13 +19,15 @@ type UploadFile struct {
 }
 
 type Upload struct {
-	ID         int64     `json:"id"`
-	Code       string    `json:"code"`
-	CreatedAt  time.Time `json:"created_at"`
-	Status     string    `json:"status"`
-	FileCount  int       `json:"file_count"`
-	TotalBytes int64     `json:"total_bytes"`
-	Folder     string    `json:"-"`
+	ID          int64     `json:"id"`
+	Code        string    `json:"code"`
+	CreatedAt   time.Time `json:"created_at"`
+	Status      string    `json:"status"`
+	FileCount   int       `json:"file_count"`
+	TotalBytes  int64     `json:"total_bytes"`
+	Folder      string    `json:"-"`
+	AdminStatus string    `json:"admin_status"`
+	AdminNote   string    `json:"admin_note"`
 }
 
 func Open(path string) (*Store, error) {
@@ -42,7 +44,9 @@ CREATE TABLE IF NOT EXISTS uploads (
  status TEXT NOT NULL,
  file_count INTEGER NOT NULL DEFAULT 0,
  total_bytes INTEGER NOT NULL DEFAULT 0,
- folder TEXT NOT NULL
+ folder TEXT NOT NULL,
+ admin_status TEXT NOT NULL DEFAULT 'received',
+ admin_note TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS upload_files (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +56,12 @@ CREATE TABLE IF NOT EXISTS upload_files (
  size_bytes INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_uploads_code ON uploads(code);
+CREATE TABLE IF NOT EXISTS upload_events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ upload_id INTEGER NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_upload_events_upload ON upload_events(upload_id);
 CREATE TABLE IF NOT EXISTS client_sessions (
  token TEXT PRIMARY KEY,
  ip TEXT NOT NULL,
@@ -75,12 +85,98 @@ CREATE TABLE IF NOT EXISTS tracking_counter (
  generation INTEGER NOT NULL DEFAULT -1,
  sequence INTEGER NOT NULL DEFAULT 0
 );
-INSERT OR IGNORE INTO tracking_counter(id,generation,sequence) VALUES(1,-1,0);`); err != nil {
+INSERT OR IGNORE INTO tracking_counter(id,generation,sequence) VALUES(1,-1,0);
+CREATE TABLE IF NOT EXISTS network_settings (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ preferred_ip TEXT NOT NULL DEFAULT '',
+ wifi_ssid TEXT NOT NULL DEFAULT '',
+ shop_name TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO network_settings(id,preferred_ip,wifi_ssid) VALUES(1,'','');
+CREATE TABLE IF NOT EXISTS blocked_ips (
+ ip TEXT PRIMARY KEY,
+ created_at TEXT NOT NULL,
+ note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_blocked_ips_created ON blocked_ips(created_at);`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := ensureUploadWorkflowColumns(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := ensureNetworkSettingsColumns(db); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{DB: db}, nil
 }
+
+// ensureUploadWorkflowColumns upgrades databases created by earlier CafeDrop versions.
+func ensureUploadWorkflowColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(uploads)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !columns["admin_status"] {
+		if _, err := db.Exec(`ALTER TABLE uploads ADD COLUMN admin_status TEXT NOT NULL DEFAULT 'received'`); err != nil {
+			return err
+		}
+	}
+	if !columns["admin_note"] {
+		if _, err := db.Exec(`ALTER TABLE uploads ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureNetworkSettingsColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(network_settings)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "shop_name" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !found {
+		_, err = db.Exec(`ALTER TABLE network_settings ADD COLUMN shop_name TEXT NOT NULL DEFAULT ''`)
+	}
+	return err
+}
+
 func (s *Store) Close() error { return s.DB.Close() }
 func (s *Store) CreateUpload(code, folder string) (int64, error) {
 	res, err := s.DB.Exec(`INSERT INTO uploads(code,created_at,status,folder) VALUES(?,?,?,?)`, code, time.Now().UTC().Format(time.RFC3339Nano), "uploading", folder)
@@ -98,11 +194,23 @@ func (s *Store) AddFile(uploadID int64, original, stored string, size int64) err
 	return err
 }
 func (s *Store) FinishUpload(id int64, status string) error {
-	_, err := s.DB.Exec(`UPDATE uploads SET status=? WHERE id=?`, status, id)
-	return err
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE uploads SET status=? WHERE id=?`, status, id); err != nil {
+		return err
+	}
+	if status == "completed" {
+		if _, err = tx.Exec(`INSERT INTO upload_events(upload_id,created_at) VALUES(?,?)`, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func (s *Store) ListUploads(limit int) ([]Upload, error) {
-	rows, err := s.DB.Query(`SELECT id,code,created_at,status,file_count,total_bytes,folder FROM uploads ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.DB.Query(`SELECT id,code,created_at,status,file_count,total_bytes,folder,admin_status,admin_note FROM uploads ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +219,7 @@ func (s *Store) ListUploads(limit int) ([]Upload, error) {
 	for rows.Next() {
 		var u Upload
 		var ts string
-		if err := rows.Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder); err != nil {
+		if err := rows.Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder, &u.AdminStatus, &u.AdminNote); err != nil {
 			return nil, err
 		}
 		u.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
@@ -122,12 +230,29 @@ func (s *Store) ListUploads(limit int) ([]Upload, error) {
 func (s *Store) FindUpload(code string) (*Upload, error) {
 	var u Upload
 	var ts string
-	err := s.DB.QueryRow(`SELECT id,code,created_at,status,file_count,total_bytes,folder FROM uploads WHERE code=?`, code).Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder)
+	err := s.DB.QueryRow(`SELECT id,code,created_at,status,file_count,total_bytes,folder,admin_status,admin_note FROM uploads WHERE code=?`, code).Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder, &u.AdminStatus, &u.AdminNote)
 	if err != nil {
 		return nil, err
 	}
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
 	return &u, nil
+}
+
+// UpdateUploadWorkflowStatus stores the attendant's hand-off decision separately
+// from the technical upload status (completed/failed/uploading).
+func (s *Store) UpdateUploadWorkflowStatus(code, status, note string) error {
+	result, err := s.DB.Exec(`UPDATE uploads SET admin_status=?, admin_note=? WHERE code=? AND status='completed'`, status, note, code)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func ErrNoRows() error        { return sql.ErrNoRows }
@@ -208,7 +333,7 @@ func (s *Store) NextTrackingCode() (string, error) {
 
 // SearchUploads matches a complete code, either numeric component, or a partial code.
 func (s *Store) SearchUploads(q string, limit int) ([]Upload, error) {
-	rows, err := s.DB.Query(`SELECT id,code,created_at,status,file_count,total_bytes,folder FROM uploads WHERE code LIKE ? ESCAPE '\' ORDER BY id DESC LIMIT ?`, "%"+escapeLike(q)+"%", limit)
+	rows, err := s.DB.Query(`SELECT id,code,created_at,status,file_count,total_bytes,folder,admin_status,admin_note FROM uploads WHERE code LIKE ? ESCAPE '\' ORDER BY id DESC LIMIT ?`, "%"+escapeLike(q)+"%", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +342,7 @@ func (s *Store) SearchUploads(q string, limit int) ([]Upload, error) {
 	for rows.Next() {
 		var u Upload
 		var ts string
-		if err := rows.Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder); err != nil {
+		if err := rows.Scan(&u.ID, &u.Code, &ts, &u.Status, &u.FileCount, &u.TotalBytes, &u.Folder, &u.AdminStatus, &u.AdminNote); err != nil {
 			return nil, err
 		}
 		u.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
@@ -230,8 +355,141 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	return strings.ReplaceAll(s, `_`, `\_`)
 }
+
+type UploadEvent struct {
+	ID       int64
+	UploadID int64
+}
+
+func (s *Store) LatestUploadEventID() (int64, error) {
+	var id int64
+	err := s.DB.QueryRow(`SELECT COALESCE(MAX(id),0) FROM upload_events`).Scan(&id)
+	return id, err
+}
+
+func (s *Store) UploadEventsAfter(lastID int64) ([]UploadEvent, error) {
+	rows, err := s.DB.Query(`SELECT id,upload_id FROM upload_events WHERE id>? ORDER BY id ASC LIMIT 500`, lastID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]UploadEvent, 0)
+	for rows.Next() {
+		var event UploadEvent
+		if err := rows.Scan(&event.ID, &event.UploadID); err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LatestCompletedID() (int64, error) {
 	var id int64
 	err := s.DB.QueryRow(`SELECT COALESCE(MAX(id),0) FROM uploads WHERE status='completed'`).Scan(&id)
 	return id, err
+}
+
+type NetworkSettings struct {
+	PreferredIP string `json:"preferred_ip"`
+	WiFiSSID    string `json:"wifi_ssid"`
+	ShopName    string `json:"shop_name"`
+}
+
+type BlockedIP struct {
+	IP        string    `json:"ip"`
+	CreatedAt time.Time `json:"created_at"`
+	Note      string    `json:"note"`
+}
+
+func (s *Store) GetNetworkSettings() (NetworkSettings, error) {
+	var v NetworkSettings
+	err := s.DB.QueryRow(`SELECT preferred_ip,wifi_ssid,shop_name FROM network_settings WHERE id=1`).Scan(&v.PreferredIP, &v.WiFiSSID, &v.ShopName)
+	return v, err
+}
+
+func (s *Store) SaveNetworkSettings(v NetworkSettings) error {
+	_, err := s.DB.Exec(`UPDATE network_settings SET preferred_ip=?,wifi_ssid=?,shop_name=? WHERE id=1`, v.PreferredIP, v.WiFiSSID, v.ShopName)
+	return err
+}
+
+func (s *Store) IsIPBlocked(ip string) (bool, error) {
+	var found int
+	err := s.DB.QueryRow(`SELECT 1 FROM blocked_ips WHERE ip=? LIMIT 1`, ip).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) BlockIP(ip, note string) error {
+	_, err := s.DB.Exec(`INSERT INTO blocked_ips(ip,created_at,note) VALUES(?,?,?) ON CONFLICT(ip) DO UPDATE SET note=excluded.note`, ip, time.Now().UTC().Format(time.RFC3339Nano), note)
+	return err
+}
+
+func (s *Store) UnblockIP(ip string) error {
+	_, err := s.DB.Exec(`DELETE FROM blocked_ips WHERE ip=?`, ip)
+	return err
+}
+
+func (s *Store) ListBlockedIPs() ([]BlockedIP, error) {
+	rows, err := s.DB.Query(`SELECT ip,created_at,note FROM blocked_ips ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BlockedIP{}
+	for rows.Next() {
+		var item BlockedIP
+		var created string
+		if err := rows.Scan(&item.IP, &created, &item.Note); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// DeleteUpload removes one upload record. Child file rows are removed by the
+// uploads -> upload_files foreign-key cascade.
+func (s *Store) DeleteUpload(code string) (string, error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var folder, status string
+	if err = tx.QueryRow(`SELECT folder,status FROM uploads WHERE code=?`, code).Scan(&folder, &status); err != nil {
+		return "", err
+	}
+	if status == "uploading" {
+		return "", fmt.Errorf("upload is still in progress")
+	}
+	if _, err = tx.Exec(`DELETE FROM uploads WHERE code=?`, code); err != nil {
+		return "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", err
+	}
+	return folder, nil
+}
+
+// CompletedUploadIDsAfter returns newly completed upload IDs in ascending order.
+func (s *Store) CompletedUploadIDsAfter(lastID int64) ([]int64, error) {
+	rows, err := s.DB.Query(`SELECT id FROM uploads WHERE status='completed' AND id>? ORDER BY id ASC LIMIT 500`, lastID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

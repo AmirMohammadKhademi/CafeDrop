@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,9 +43,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/heartbeat", s.handleSessionHeartbeat)
 	s.mux.HandleFunc("/api/session/leave", s.handleSessionLeave)
 	s.mux.HandleFunc("/api/admin/sessions", s.admin(s.handleAdminSessions))
+	s.mux.HandleFunc("/api/admin/network", s.admin(s.handleAdminNetwork))
+	s.mux.HandleFunc("/api/admin/network/qr", s.admin(s.handleAdminNetworkQR))
+	s.mux.HandleFunc("/api/admin/devices/block", s.admin(s.handleAdminBlockIP))
+	s.mux.HandleFunc("/api/admin/devices/unblock", s.admin(s.handleAdminUnblockIP))
 	s.mux.HandleFunc("/api/admin/session-settings", s.admin(s.handleAdminSessionSettings))
 	s.mux.HandleFunc("/api/admin/session-action", s.admin(s.handleAdminSessionAction))
 	s.mux.HandleFunc("/api/admin/uploads", s.admin(s.handleAdminUploads))
+	s.mux.HandleFunc("/api/admin/delete-upload", s.admin(s.handleAdminDeleteUpload))
+	s.mux.HandleFunc("/api/admin/upload-status", s.admin(s.handleAdminUploadStatus))
 	s.mux.HandleFunc("/api/admin/search", s.admin(s.handleSearchUploads))
 	s.mux.HandleFunc("/api/admin/events", s.admin(s.handleAdminEvents))
 	s.mux.HandleFunc("/api/admin/lookup", s.admin(s.handleLookup))
@@ -83,45 +90,62 @@ func securityHeaders(next http.Handler) http.Handler {
 // Authenticated server-sent events: browser uses fetch with its existing Basic auth header.
 func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "stream unsupported", 500)
+		http.Error(w, "stream unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	// The client sends its last processed event ID on reconnect so that
+	// uploads completed during a short disconnect are not silently skipped.
+	latest, err := s.db.LatestUploadEventID()
+	if err != nil {
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	after := latest
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || parsed < 0 {
+			http.Error(w, "invalid event cursor", http.StatusBadRequest)
+			return
+		}
+		after = parsed
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	latest, err := s.db.LatestCompletedID()
-	if err != nil {
-		http.Error(w, "database error", 500)
-		return
-	}
-	fmt.Fprintf(w, "event: ready\ndata: %d\n\n", latest)
+	_, _ = fmt.Fprintf(w, "id: %d\nevent: ready\ndata: %d\n\n", after, after)
 	flusher.Flush()
-	ticker := time.NewTicker(time.Second)
-	ticks := 0
+
+	ticker := time.NewTicker(1500 * time.Millisecond)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
 			ticks++
-			if ticks%5 == 0 {
-				fmt.Fprint(w, "event: sessions\ndata: 1\n\n")
+			if ticks%10 == 0 {
+				_, _ = fmt.Fprint(w, "event: sessions\ndata: 1\n\n")
 			}
-			current, err := s.db.LatestCompletedID()
-			if err != nil {
+			events, queryErr := s.db.UploadEventsAfter(after)
+			if queryErr != nil {
 				return
 			}
-			if current > latest {
-				fmt.Fprintf(w, "event: upload\ndata: %d\n\n", current)
-				latest = current
+			if len(events) == 0 {
+				_, _ = fmt.Fprint(w, ": heartbeat\n\n")
 			} else {
-				fmt.Fprint(w, ": heartbeat\n\n")
+				for _, event := range events {
+					_, _ = fmt.Fprintf(w, "id: %d\nevent: upload\ndata: %d\n\n", event.ID, event.UploadID)
+					after = event.ID
+				}
 			}
 			flusher.Flush()
 		}

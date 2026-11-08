@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -107,7 +106,9 @@ func (s *Server) sessionResponse(token string, now time.Time, cfg sessionSetting
 	active, _ := s.activeCount(now)
 	var waiting int
 	_ = s.db.DB.QueryRow(`SELECT COUNT(*) FROM client_sessions WHERE status='waiting'`).Scan(&waiting)
-	response := map[string]any{"status": status, "active_count": active, "waiting_count": waiting, "active_limit": cfg.MaxActive, "duration_minutes": cfg.DurationMinutes, "grace_minutes": cfg.GraceMinutes}
+	shopName := ""
+	_ = s.db.DB.QueryRow(`SELECT shop_name FROM network_settings WHERE id=1`).Scan(&shopName)
+	response := map[string]any{"status": status, "active_count": active, "waiting_count": waiting, "active_limit": cfg.MaxActive, "duration_minutes": cfg.DurationMinutes, "grace_minutes": cfg.GraceMinutes, "shop_name": shopName}
 	if status == "waiting" {
 		response["queue_position"] = pos
 	}
@@ -121,11 +122,7 @@ func (s *Server) sessionResponse(token string, now time.Time, cfg sessionSetting
 }
 
 func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return normalizeClientIP(r.RemoteAddr)
 }
 
 func randomToken() (string, error) {
@@ -143,6 +140,10 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
+	if s.ipBlocked(clientIP(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "دسترسی این IP توسط مدیر کافی‌نت مسدود شده است."})
+		return
+	}
 	now := time.Now().UTC()
 	cfg, err := s.getSessionSettings()
 	if err != nil {
@@ -163,7 +164,7 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if token != "" {
 		var status string
-		if e := s.db.DB.QueryRow(`SELECT status FROM client_sessions WHERE token=?`, token).Scan(&status); e == nil && (status == "active" || status == "grace" || status == "waiting") {
+		if e := s.db.DB.QueryRow(`SELECT status FROM client_sessions WHERE token=?`, token).Scan(&status); e == nil && (status == "active" || status == "waiting") {
 			_, _ = s.db.DB.Exec(`UPDATE client_sessions SET last_seen=? WHERE token=?`, sessionTimestamp(now), token)
 			_ = s.promoteWaiting(now, cfg)
 			data, e := s.sessionResponse(token, now, cfg)
@@ -220,6 +221,11 @@ func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) 
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
+	if s.ipBlocked(clientIP(r)) {
+		_, _ = s.db.DB.Exec(`UPDATE client_sessions SET status='kicked' WHERE token=?`, c.Value)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "دسترسی این IP مسدود شده است."})
+		return
+	}
 	now := time.Now().UTC()
 	cfg, err := s.getSessionSettings()
 	if err != nil {
@@ -271,6 +277,9 @@ func (s *Server) sessionAllowsUpload(r *http.Request) bool {
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
+	if s.ipBlocked(clientIP(r)) {
+		return false
+	}
 	now := time.Now().UTC()
 	cfg, err := s.getSessionSettings()
 	if err != nil {
@@ -284,14 +293,11 @@ func (s *Server) sessionAllowsUpload(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	if status == "active" {
-		return true
+	if status != "active" {
+		return false
 	}
-	if status == "grace" && grace != "" {
-		t, e := time.Parse(time.RFC3339Nano, grace)
-		return e == nil && now.Before(t)
-	}
-	return false
+	t, parseErr := time.Parse(time.RFC3339Nano, expires)
+	return parseErr == nil && now.Before(t)
 }
 
 func (s *Server) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
